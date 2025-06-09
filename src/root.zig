@@ -35,6 +35,12 @@ pub fn open(name: []const u8) DbError!DB {
     return DB{ .dir = db_dir };
 }
 
+test "open DB" {
+    const db = try open("_test");
+    _ = db;
+    try std.fs.cwd().deleteDir("_test");
+}
+
 // +----- TABLES -----+
 // Tabbles are single files under a Database directory.
 
@@ -48,16 +54,26 @@ pub fn Table(comptime T: type) type {
     // Table Struct
     return struct {
         const Self = @This();
+        name: []const u8,
         db: *DB,
 
         /// Initializes the table with a corresponding Database.
         /// If no Database is available, no tables can be found.
         pub fn init(db: *DB) Self {
-            return Self{ .db = db };
+            const t_name = @typeName(T);
+            var dot_index: usize = 0;
+            var i: usize = 0;
+            while (t_name[i] != 0) : (i += 1) {
+                if (t_name[i] == '.' and t_name[i + 1] != 0) {
+                    dot_index = i + 1;
+                }
+            }
+            const name = t_name[dot_index..];
+            return Self{ .db = db, .name = name };
         }
         /// Checks if a table exists
         pub fn exists(self: *Self) TableError!bool {
-            self.db.dir.access(@typeName(T), .{ .mode = .read_only }) catch return false;
+            self.db.dir.access(self.name, .{ .mode = .read_only }) catch return false;
             return true;
         }
         /// Checks if the definition of the table has changed
@@ -68,16 +84,17 @@ pub fn Table(comptime T: type) type {
         }
         /// Right now, replacing/updating, deletes all the data
         pub fn replace(self: *Self) !void {
-            try self.db.dir.deleteFile(@typeName(T));
+            try self.db.dir.deleteFile(self.name);
             return self.create();
         }
         /// Create The Table on Disk
         pub fn create(self: *Self) !void {
             // create file
-
-            const tbl_file = self.db.dir.openFile(@typeName(T), .{ .mode = .write_only }) catch blk: {
-                break :blk try self.db.dir.createFile(@typeName(T), .{});
+            const tbl_file = self.db.dir.openFile(self.name, .{ .mode = .write_only }) catch blk: {
+                break :blk try self.db.dir.createFile(self.name, .{});
             };
+            defer tbl_file.close();
+            // HEADER
             // initialize row count with 0
             _ = try tbl_file.write(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 });
             // write length of colums
@@ -94,6 +111,24 @@ pub fn Table(comptime T: type) type {
             }
         }
     };
+}
+
+test "create table" {
+    const test_table = struct { age: u8, name: []u8 };
+    var db = try open("_test_create_table");
+    const table = try db.table(test_table);
+    _ = table;
+    var is_inside = false;
+    var db_dir = try std.fs.cwd().openDir("_test_create_table", .{ .iterate = true });
+    var iter = db_dir.iterate();
+    while (try iter.next()) |f| {
+        if (std.mem.eql(u8, f.name, "test_table")) {
+            is_inside = true;
+        }
+    }
+    try testing.expect(is_inside);
+    try db_dir.deleteFile("test_table");
+    try std.fs.cwd().deleteDir("_test_create_table");
 }
 
 // +----- Types -----+
