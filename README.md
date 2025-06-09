@@ -1,5 +1,5 @@
 # waidb
-**W**hat **A**m **I** **D**oing (Data)**B**ase
+**W**hat **A**m **I** **D**oing (Data)**B**ase.
 This is a database to for me to explore database concepts and just play around.
 ## Features
 Features that I wish to implement:
@@ -11,7 +11,6 @@ Features that I wish to implement:
 - datatypes
   - i8-i128 - u8-u128
   - string (max 65535 chars (u16))
-  - binary
   - nullable types (?u8)
 - Language libraries for my favourite languages:
   - Zig
