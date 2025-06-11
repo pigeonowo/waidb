@@ -67,8 +67,8 @@ pub fn Table(comptime T: type, name: []const u8) type {
         pub fn init(db: *DB) Self {
             var dot_index: usize = 0;
             var i: usize = 0;
-            while (i >= name.len and name[i] != 0) : (i += 1) {
-                if (name[i] == '.' and name[i + 1] != 0) {
+            while (i < name.len) : (i += 1) {
+                if (name[i] == '.' and i != name.len - 1) {
                     dot_index = i + 1;
                 }
             }
