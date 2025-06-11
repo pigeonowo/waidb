@@ -10,8 +10,8 @@ const DB = struct {
     dir: std.fs.Dir,
 
     /// Creates or Updates a table using a custom Struct.
-    pub fn table(self: *Self, comptime T: type) !Table(T) {
-        var tbl = Table(T).init(self);
+    pub fn table(self: *Self, comptime T: type) !Table(T, @typeName(T)) {
+        var tbl = Table(T, @typeName(T)).init(self);
         if (try tbl.exists() and try tbl.changed()) {
             try tbl.replace();
         } else if (!try tbl.exists()) {
@@ -46,7 +46,12 @@ test "open DB" {
 
 const TableError = error{noDatabase};
 
-pub fn Table(comptime T: type) type {
+pub const TableCol = struct {
+    name: []const u8,
+    t: DbType,
+};
+
+pub fn Table(comptime T: type, name: []const u8) type {
     // validation
     const struct_fields = @typeInfo(T).@"struct".fields;
     comptime if (struct_fields.len > 255) @panic("Tables can't have more than 255 fields.");
@@ -60,16 +65,15 @@ pub fn Table(comptime T: type) type {
         /// Initializes the table with a corresponding Database.
         /// If no Database is available, no tables can be found.
         pub fn init(db: *DB) Self {
-            const t_name = @typeName(T);
             var dot_index: usize = 0;
             var i: usize = 0;
-            while (t_name[i] != 0) : (i += 1) {
-                if (t_name[i] == '.' and t_name[i + 1] != 0) {
+            while (name[i] != 0) : (i += 1) {
+                if (name[i] == '.' and name[i + 1] != 0) {
                     dot_index = i + 1;
                 }
             }
-            const name = t_name[dot_index..];
-            return Self{ .db = db, .name = name };
+            const t_name = name[dot_index..];
+            return Self{ .db = db, .name = t_name };
         }
         /// Checks if a table exists
         pub fn exists(self: *Self) TableError!bool {
@@ -90,9 +94,7 @@ pub fn Table(comptime T: type) type {
         /// Create The Table on Disk
         pub fn create(self: *Self) !void {
             // create file
-            const tbl_file = self.db.dir.openFile(self.name, .{ .mode = .write_only }) catch blk: {
-                break :blk try self.db.dir.createFile(self.name, .{});
-            };
+            var tbl_file = try self.get_file();
             defer tbl_file.close();
             // HEADER
             // initialize row count with 0
@@ -102,13 +104,47 @@ pub fn Table(comptime T: type) type {
             _ = try tbl_file.write(&[_]u8{@as(u8, fields.len)});
             // columns
             inline for (fields) |f| {
-                // column length
-                _ = try tbl_file.write(&[_]u8{@as(u8, f.name.len)}); // column type
+                // column type
                 const col_type = DbType.from_type(f.type);
                 _ = try tbl_file.write(&[_]u8{col_type.to_int()});
+                // column length
+                _ = try tbl_file.write(&[_]u8{@as(u8, f.name.len)});
                 // column name
                 _ = try tbl_file.write(f.name);
             }
+        }
+
+        fn get_file(self: *Self) !std.fs.File {
+            return self.db.dir.openFile(self.name, .{ .mode = .write_only }) catch blk: {
+                break :blk try self.db.dir.createFile(self.name, .{});
+            };
+        }
+
+        pub fn table_info(self: *Self, allocator: std.mem.Allocator) ![]TableCol {
+            var tbl_file = try self.get_file();
+            defer tbl_file.close();
+            // skip row count
+            try tbl_file.seekTo(8);
+            // get col length
+            var col_length_buf: [1]u8 = .{0};
+            try tbl_file.read(&col_length_buf);
+            const col_length = col_length_buf[0];
+            var table_cols: []TableCol = try allocator.alloc(TableCol, @as(usize, col_length)); // do we need to alloc when 0?
+            for (0..col_length) |i| {
+                // type
+                var col_type_buf: [1]u8 = undefined;
+                try tbl_file.read(&col_type_buf);
+                const col_type = DbType.from_int(col_type_buf[0]);
+                // name len
+                var col_name_len_buf: [1]u8 = undefined;
+                try tbl_file.read(&col_name_len_buf);
+                const col_name_len = col_name_len_buf[0];
+                // name
+                const col_name: []u8 = try allocator.alloc(u8, @as(usize, col_name_len));
+                try tbl_file.read(col_name);
+                table_cols[i] = TableCol{ .t = col_type, .name = col_name };
+            }
+            return table_cols;
         }
     };
 }
@@ -182,4 +218,109 @@ const DbType = enum(u8) {
     pub fn to_int(self: Self) u8 {
         return @intFromEnum(self);
     }
+
+    pub fn from_int(i: u8) Self {
+        return @enumFromInt(i);
+    }
+};
+
+// +----- Commands -----+
+
+pub const Insert = struct {
+    const Self = @This();
+    executor: CommandExecutor,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return Self{ .allocator = allocator, .executor = CommandExecutor.init(allocator) };
+    }
+
+    // pub fn field(...)
+};
+
+// +----- Command "VM" -----+
+
+pub const Command = union(enum) {
+    insert: void,
+    table_context: []u8, // tablename
+    field: []u8, // field name
+    field_value: []u8,
+    field_type: []u8,
+    nop: void,
+    stop: void, // tells the CommandExecutor to stop
+};
+
+// TODO: make better
+// a result for select, insert, etc
+const CommandResult = union(enum) { ok: void, err: []const u8, insert: enum { ok, err } };
+
+pub const CommandExecutor = struct {
+    const Self = @This();
+    cmds: []Command,
+    cmd_ptr: usize = 0,
+    db_context: ?[]u8 = null,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, cmds: []Command) Self {
+        return Self{ .cmds = cmds, .allocator = allocator };
+    }
+
+    pub fn next_command(self: *Self) ?CommandResult {
+        if (!(self.cmd_ptr < self.cmds.len)) {
+            return null;
+        }
+        const cmd = self.cmds[self.cmd_ptr];
+        self.cmd_ptr += 1;
+        return cmd;
+    }
+    pub fn run(self: *Self) ?CommandResult {
+        var result: ?CommandResult = .ok;
+        while (self.next_command()) |cmd| {
+            result = switch (cmd) {
+                Command.stop => .ok,
+                Command.nop => .ok,
+                Command.db_context => |db| self.db_context = db,
+                Command.insert => if (self.db_context) {
+                    const ih = InsertHandler.init(self);
+                    return ih.run();
+                } else {
+                    // @panic("No DB context set")
+                    return .{ .err = "No DB context set" };
+                },
+                else => return .{ .err = "Not a valid Command" },
+            };
+        } else {
+            return .ok;
+        }
+        return result;
+    }
+
+    const InsertHandler = struct {
+        executor: *CommandExecutor,
+        tbl_context: ?[]u8,
+        tbl_cols: ?[]TableCol,
+
+        pub fn init(e: *CommandExecutor) @This() {
+            return InsertHandler{ .executor = e, .tbl_context = null };
+        }
+
+        pub fn run(self: *@This()) CommandResult.insert {
+            var result: CommandResult = .{ .insert = .err };
+            w: while (self.executor.next_command()) |cmd| {
+                switch (cmd) {
+                    Command.table_context => |tbl| {
+                        self.tbl_context = tbl;
+                        const db = open(self.executor.db_context) catch return .{ .insert = .err };
+                        self.tbl_cols = Table(.{}, tbl).init(&db).table_info(self.executor.allocator);
+                    },
+                    Command.field => {},
+                    else => {
+                        result = .{ .insert = .err };
+                        break :w;
+                    },
+                }
+            }
+            return result;
+        }
+    };
 };
