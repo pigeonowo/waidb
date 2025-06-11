@@ -94,7 +94,7 @@ pub fn Table(comptime T: type, name: []const u8) type {
         /// Create The Table on Disk
         pub fn create(self: *Self) !void {
             // create file
-            var tbl_file = try self.get_file();
+            var tbl_file = try self.get_file(.write_only);
             defer tbl_file.close();
             // HEADER
             // initialize row count with 0
@@ -114,34 +114,34 @@ pub fn Table(comptime T: type, name: []const u8) type {
             }
         }
 
-        fn get_file(self: *Self) !std.fs.File {
-            return self.db.dir.openFile(self.name, .{ .mode = .write_only }) catch blk: {
+        fn get_file(self: *Self, mode: std.fs.File.OpenMode) !std.fs.File {
+            return self.db.dir.openFile(self.name, .{ .mode = mode }) catch blk: {
                 break :blk try self.db.dir.createFile(self.name, .{});
             };
         }
 
-        pub fn table_info(self: *Self, allocator: std.mem.Allocator) ![]TableCol {
-            var tbl_file = try self.get_file();
+        pub fn info(self: *Self, allocator: std.mem.Allocator) ![]TableCol {
+            var tbl_file = try self.get_file(.read_only);
             defer tbl_file.close();
             // skip row count
             try tbl_file.seekTo(8);
             // get col length
             var col_length_buf: [1]u8 = .{0};
-            try tbl_file.read(&col_length_buf);
+            _ = try tbl_file.read(&col_length_buf);
             const col_length = col_length_buf[0];
             var table_cols: []TableCol = try allocator.alloc(TableCol, @as(usize, col_length)); // do we need to alloc when 0?
             for (0..col_length) |i| {
                 // type
                 var col_type_buf: [1]u8 = undefined;
-                try tbl_file.read(&col_type_buf);
+                _ = try tbl_file.read(&col_type_buf);
                 const col_type = DbType.from_int(col_type_buf[0]);
                 // name len
                 var col_name_len_buf: [1]u8 = undefined;
-                try tbl_file.read(&col_name_len_buf);
+                _ = try tbl_file.read(&col_name_len_buf);
                 const col_name_len = col_name_len_buf[0];
                 // name
                 const col_name: []u8 = try allocator.alloc(u8, @as(usize, col_name_len));
-                try tbl_file.read(col_name);
+                _ = try tbl_file.read(col_name);
                 table_cols[i] = TableCol{ .t = col_type, .name = col_name };
             }
             return table_cols;
@@ -311,7 +311,7 @@ pub const CommandExecutor = struct {
                     Command.table_context => |tbl| {
                         self.tbl_context = tbl;
                         const db = open(self.executor.db_context) catch return .{ .insert = .err };
-                        self.tbl_cols = Table(.{}, tbl).init(&db).table_info(self.executor.allocator);
+                        self.tbl_cols = Table(.{}, tbl).init(&db).info(self.executor.allocator);
                     },
                     Command.field => {},
                     else => {
