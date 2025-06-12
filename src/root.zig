@@ -244,8 +244,10 @@ pub const Command = union(enum) {
     insert: void,
     table_context: []u8, // tablename
     field: []u8, // field name
-    field_value: []u8,
-    field_type: []u8,
+    field_type: DbType,
+    field_value: []u8, // bytes of value
+    fields_stop: void,
+    insert_stop: void,
     nop: void,
     stop: void, // tells the CommandExecutor to stop
 };
@@ -299,23 +301,69 @@ pub const CommandExecutor = struct {
         executor: *CommandExecutor,
         tbl_context: ?[]u8,
         tbl_cols: ?[]TableCol,
+        collecting_fields_state: FieldCollectionState = .NotCollecting,
+        tbl_names: ?[][]u8,
+        tbl_values: ?[][]u8,
+
+        const FieldCollectionState = enum { NotCollecting, StopCollecting, Name, Type, Value };
+
+        const ColumnWriter = struct {
+            amount_cols: u8,
+            size: u64,
+            allocator: std.mem.Allocator,
+            cols: []Column,
+            col_index: u8 = 0,
+
+            const Column = struct { name: []u8, value: []u8 };
+
+            // user does not need to free memory
+            pub fn init(amount_cols: u8, allocator: std.mem.Allocator) !@This() {
+                return ColumnWriter{ .amount_cols = amount_cols, .size = 0, .cols = try allocator.alloc(Column, @as(usize, amount_cols)), .allocator = allocator };
+            }
+
+            pub fn field(self: *@This(), col: Column) void {
+                self.size += col.value.len;
+                self.cols[self.col_index] = col;
+                self.col_index += 1;
+            }
+
+            pub fn write(self: *@This(), table_name: []const u8, db: *DB) !void {
+                defer self.allocator.free(self.cols);
+                // TODO: get positions of fields
+                const tbl_file = try Table(.{}, table_name).init(db).get_file(.write_only);
+                // to end
+                try tbl_file.seekTo(try tbl_file.getEndPos());
+                // colsize
+                _ = try tbl_file.write(int_to_be(u64, self.size));
+                for (self.cols) |col| {
+                    _ = try tbl_file.write(int_to_be(u32, @as(u32, col.value.len)));
+                    // NOTE: check if len value isnt over u32 range?
+                    _ = try tbl_file.write(col.value);
+                }
+            }
+        };
 
         pub fn init(e: *CommandExecutor) @This() {
-            return InsertHandler{ .executor = e, .tbl_context = null };
+            return InsertHandler{ .executor = e, .tbl_context = null, .tbl_cols = null, .tbl_names = null, .tbl_values = null };
         }
 
         pub fn run(self: *@This()) CommandResult.insert {
-            var result: CommandResult = .{ .insert = .err };
+            // TODO: better error handling/result
+            var result: CommandResult.insert = .err;
             w: while (self.executor.next_command()) |cmd| {
                 switch (cmd) {
                     Command.table_context => |tbl| {
                         self.tbl_context = tbl;
-                        const db = open(self.executor.db_context) catch return .{ .insert = .err };
+                        const db = open(self.executor.db_context) catch break :w .err;
                         self.tbl_cols = Table(.{}, tbl).init(&db).info(self.executor.allocator);
+                        self.collecting_fields_state = .Name;
                     },
-                    Command.field => {},
+                    Command.field => {
+                        if (self.tbl_context == null or self.collecting_fields_state != .Name) break :w .err;
+                        // TODO
+                    },
                     else => {
-                        result = .{ .insert = .err };
+                        result = .err;
                         break :w;
                     },
                 }
@@ -324,3 +372,16 @@ pub const CommandExecutor = struct {
         }
     };
 };
+
+// +----- Helpers -----+
+/// be = big endian
+inline fn int_to_be(comptime T: type, int: T) [@sizeOf(T)]u8 {
+    const S = @sizeOf(T);
+    var buf: [S]u8 = .{0}**S;
+    var i = S;
+    var j = 0;
+    while (S >= 0) : ({i -= 1; j += 1}) {
+        buf[j] = @as(u8((int >> i) & 0b1111_1111))
+    }
+    return buf;
+}
